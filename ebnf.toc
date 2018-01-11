@@ -1,0 +1,122 @@
+
+(add-ns fr (git-dependency "https://github.com/Toccata-Lang/Free.git"
+                           "free.toc"
+                           :sha "2ab53a3"))
+(add-ns grmr (git-dependency "https://github.com/Toccata-Lang/grammar.git"
+                             "grammar.toc"
+                             :sha "7690cd3"))
+(add-ns st (git-dependency "https://github.com/Toccata-Lang/state"
+                           "state.toc"
+                           :sha "9781829"))
+
+(deftype Rules [order rules])
+
+(defprotocol FormatRule
+  (rule-str [r]
+    r))
+
+(extend-type List
+  FormatRule
+  (rule-str [l] (to-str (interpose l " "))))
+
+(defprotocol Make-EBNF
+  (ebnf [_]
+    (st/state "")))
+
+(extend-type grmr/parser-terminal
+  Make-EBNF
+  (ebnf [terminal]
+    (st/state (str "'" (escape-chars (.term-str terminal)) "'"))))
+
+(extend-type grmr/none-or-more-rule
+  Make-EBNF
+  (ebnf [r]
+    (map (.rule r) (fn [r-str] (str "{ " r-str " }")))))
+
+(extend-type grmr/ignore-rule
+  Make-EBNF
+  (ebnf [r]
+    (.rule r)))
+
+(extend-type Function
+  Make-EBNF
+  (ebnf [f]
+    (st/state (fn [& l] (-> l
+                            (remove empty?)
+                            (interpose ", ")
+                            to-str)))))
+
+(extend-type grmr/parser-char-range
+  Make-EBNF
+  (ebnf [r]
+    (st/state (str "'" (escape-chars (.lower r)) "' - '" (escape-chars (.higher r)) "'"))))
+
+(extend-type grmr/repeat-rule
+  Make-EBNF
+  (ebnf [r]
+    (map (.rule r) (fn [r-str] (str r-str ", { " r-str " }")))))
+
+(extend-type grmr/parser-not-char
+  Make-EBNF
+  (ebnf [terminal]
+    (st/state (str "not '" (escape-chars (.test-c terminal)) "'"))))
+
+(extend-type grmr/Union
+  Make-EBNF
+  (ebnf [r]
+    (apply* (st/state (fn [& children]
+                        (either (for [fst (first children)
+                                      snd (second children)
+                                      :when (= "''" snd)]
+                                  (str "[" fst "]"))
+                                (apply str (interpose children " | ")))))
+            (.rules r))))
+
+(extend-type grmr/Cat
+  Make-EBNF
+  (ebnf [r]
+    (apply* (st/state (fn [& children]
+                        (apply str (-> children
+                                       (remove empty?)
+                                       (interpose ", ")))))
+            (.rules r))))
+
+(extend-type grmr/recursion-rule
+  Make-EBNF
+  (ebnf [r]
+    (st/state (.rule-name r))))
+
+(defn remember-rule [r]
+  (for [rule (.grammar r)
+        _ (st/update-state (fn [s]
+                             (either (and (get-in s [.rules (.name r)])
+                                          (maybe s))
+                                     (-> s
+                                         (assoc-in [.rules (.name r)] rule)
+                                         (.order (conj (.order s) (.name r)))))))]
+    (.name r)))
+
+(extend-type grmr/recursive-parser-rule
+  Make-EBNF
+  (ebnf [r]
+    (remember-rule r)))
+
+(extend-type grmr/parser-rule
+  Make-EBNF
+  (ebnf [r]
+    (remember-rule r)))
+
+(extend-type grmr/parser-term-fn
+  Make-EBNF
+  (ebnf [terminal]
+    (st/state (str (.f terminal)))))
+
+(defn produce-ebnf [g]
+  (either (for [m (second ((fr/evaluate g ebnf) (Rules [] {})))
+                result (apply* (maybe str)
+                               (map (seq (.order m)) (fn [name]
+                                                       (map (get (.rules m) name)
+                                                            (fn [rule]
+                                                              (str name " = " rule ";\n"))))))]
+            result)
+          ""))
